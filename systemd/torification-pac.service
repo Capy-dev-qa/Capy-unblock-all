@@ -1,0 +1,14 @@
+[Unit]
+Description=Torification PAC server (browser-agnostic)
+After=network.target
+
+[Service]
+Type=simple
+Environment=TORIFICATION_PAC=%h/.config/torification/proxy.pac
+Environment=TORIFICATION_PAC_PORT=18767
+ExecStart=%h/projects/torification/.venv/bin/python3 %h/projects/torification/scripts/pac_server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

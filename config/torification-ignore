@@ -1,0 +1,52 @@
+# torification-ignore — сайты, которые daemon НЕ проверяет и НЕ torify-ит.
+# Формат: одна запись на строку. Строки с # — комментарии.
+#
+#   example.com          — точное совпадение host
+#   .example.com         — host и все поддомены (*.example.com)
+#   192.168.1.0/24       — CIDR (локальные сети)
+#   *localhost*          — glob (шаблон)
+
+# Локальные / служебные
+127.0.0.0/8
+10.0.0.0/8
+172.16.0.0/12
+192.168.0.0/16
+localhost
+.local
+.internal
+
+# CDN и инфра, которые не имеет смысла гонять через Tor
+.captainbedrock.net
+
+# Discord — DIRECT + zapret (UDP голос), не Tor
+discord.com
+.discord.com
+discord.gg
+.discord.gg
+discord.media
+.discord.media
+discordapp.com
+.discordapp.com
+discordapp.net
+.discordapp.net
+discordcdn.com
+.discordcdn.com
+discordserver.info
+gateway.discord.gg
+
+# Telegram web — static PAC :9050, не динамический torify
+web.telegram.org
+
+# CDN — не torify (ресурсы страницы, не сам сайт)
+.1e100.net
+.googleusercontent.com
+.gstatic.com
+.fbcdn.net
+.cloudfront.net
+.cloudos.autodesk.com
+
+
+# Уже вручную настроено в PAC (не трогать daemon'ом)
+# Раскомментируй, если хочешь полностью исключить:
+# .youtube.com
+# .telegram.org

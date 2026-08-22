@@ -1,0 +1,47 @@
+# Политика UDP для torification
+# Tor не проксирует произвольный UDP — для каждого сценария свой режим.
+
+[default]
+# direct | drop | zapret | socks5 | tproxy
+mode = "direct"
+# Логировать UDP-пакеты браузерных PID (диагностика)
+log = false
+
+# --- Режимы ---
+# direct  — пропускать как есть (часто + zapret на уровне системы)
+# drop    — блокировать (Chrome: --force-webrtc-ip-handling-policy=disable_non_proxied_udp)
+# zapret  — передать в nfqws/winws (Discord voice, игры) — нужен root + zapret
+# socks5  — SOCKS5 UDP ASSOCIATE (редко работает через Tor; для non-Tor SOCKS)
+# tproxy  — прозрачный прокси + udpgw (Discord desktop, VoIP)
+
+[browser]
+# Браузер: QUIC уже отключён флагами; WebRTC UDP — drop или proxy
+quic = "drop"          # Chrome/Firefox: --disable-quic
+webrtc = "drop"        # disable_non_proxied_udp
+dns_udp = "direct"     # или "drop" + DoH
+
+[discord]
+# Discord voice (UDP 19294-19344, 50000-50100)
+mode = "zapret"
+ports = ["19294-19344", "50000-50100"]
+# Путь к zapret nfqws (Linux)
+zapret_nfqws = "/usr/local/bin/nfqws"
+# Windows: winws.exe через WSL/remote — см. README
+
+[gaming]
+mode = "zapret"
+ports = ["27000-27100", "7777-7784"]
+
+[tor_socks_udp]
+# Экспериментально: Tor 0.4.8+ SOCKS5 UDP через EXT_ASSOCIATE
+# Работает только для приложений с явной поддержкой; браузеры — нет.
+enabled = false
+socks_host = "127.0.0.1"
+socks_port = 9054
+
+[tproxy]
+# Linux: iptables/nftables TPROXY → redsocks/badvpn-udpgw
+enabled = false
+mark = 0x64
+table = "torification"
+redirect_ports = ["443"]

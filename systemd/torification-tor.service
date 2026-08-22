@@ -1,0 +1,13 @@
+[Unit]
+Description=Tor instance for torification (auto-torified sites)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/tor -f %h/.config/torification/torrc
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

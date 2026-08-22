@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Chrome с PAC torification (GUI «Use system proxy» на Linux Mint не работает).
+set -euo pipefail
+
+PAC_URL="http://127.0.0.1:18767/proxy.pac"
+PAC_PORT=18767
+PROFILE_DIR="${CHROME_PROFILE_DIRECTORY:-Default}"
+LOG_DIR="${XDG_RUNTIME_DIR:-$HOME/.local/state}/chrome-torification"
+LOG="$LOG_DIR/chrome.log"
+
+install -d -m 700 "$LOG_DIR"
+
+port_ok() {
+  ss -lntH "sport = :$1" 2>/dev/null | grep -q .
+}
+
+ensure_services() {
+  systemctl --user start torification-tor.service torification-pac.service torification.service 2>/dev/null || true
+  # Telegram / X / Autodesk — system Tor :9050 (не torification :9054)
+  if ! ss -lntH 'sport = :9050' 2>/dev/null | grep -q .; then
+    echo "Запускаю system Tor :9050 (нужен для Telegram)..." >&2
+    sudo systemctl start tor 2>/dev/null || systemctl start tor 2>/dev/null || true
+  fi
+  for _ in $(seq 1 30); do
+    port_ok "$PAC_PORT" && curl -fsS --max-time 2 "$PAC_URL" >/dev/null 2>&1 && return 0
+    sleep 0.3
+  done
+  echo "PAC-сервер не отвечает на $PAC_URL" >&2
+  echo "  systemctl --user start torification-pac torification-tor torification" >&2
+  return 1
+}
+
+chrome_running() {
+  pgrep -af '/opt/google/chrome/chrome' 2>/dev/null | grep -v 'type=' | grep -v crashpad | grep -q .
+}
+
+has_torification_pac() {
+  pgrep -af '/opt/google/chrome/chrome' 2>/dev/null | grep -v 'type=' | grep -q "proxy-pac-url=$PAC_URL"
+}
+
+reject_flag_args() {
+  local a
+  for a in "$@"; do
+    case "$a" in
+      -*) echo "Аргument '$a' похож на флаг Chrome — передай URL без '-'." >&2; return 1 ;;
+    esac
+  done
+}
+
+launch_chrome() {
+  local urls=("$@")
+  setsid google-chrome-stable \
+    --profile-directory="$PROFILE_DIR" \
+    --proxy-pac-url="$PAC_URL" \
+    --host-resolver-rules="MAP web.telegram.org 149.154.167.99, MAP telegram.org 149.154.167.99, MAP *.web.telegram.org 149.154.167.99, MAP api.telegram.org 149.154.166.110, MAP x.com 162.159.140.229, MAP twitter.com 162.159.140.229, EXCLUDE 127.0.0.1" \
+    --force-webrtc-ip-handling-policy=disable_non_proxied_udp \
+    --disable-features=DnsOverHttps,AsyncDns,Quic,WebRtcAllowInputVolumeAdjustment \
+    --disable-quic \
+    --no-first-run \
+    --new-window \
+    -- \
+    "${urls[@]}" \
+    </dev/null >>"$LOG" 2>&1 &
+}
+
+main() {
+  ensure_services || exit 1
+
+  if [[ $# -eq 0 ]]; then
+    set -- "about:blank"
+  fi
+  reject_flag_args "$@" || exit 1
+
+  if chrome_running; then
+    if has_torification_pac; then
+      google-chrome-stable --profile-directory="$PROFILE_DIR" -- "$@" >/dev/null 2>&1 || true
+      echo "Открыто в уже запущенном Chrome (torification PAC)."
+      exit 0
+    fi
+    echo "Chrome уже запущен БЕЗ torification PAC." >&2
+    echo "Закрой все окна Chrome и запусти снова:" >&2
+    echo "  chrome-torification $*" >&2
+    echo "" >&2
+    echo "Или вручную (замени все окна Chrome):" >&2
+    echo "  google-chrome-stable --proxy-pac-url=\"$PAC_URL\" -- $*" >&2
+    exit 1
+  fi
+
+  launch_chrome "$@"
+  echo "Chrome запущен с PAC: $PAC_URL"
+}
+
+main "$@"

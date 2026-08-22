@@ -1,0 +1,62 @@
+# Скопируй в ~/.config/torification/torification.toml
+
+[general]
+# Каталог состояния (torified-hosts.json, логи, ML-модель)
+state_dir = "~/.local/state/torification"
+# Интервал опроса новых соединений браузера (сек)
+poll_interval = 2.0
+# Повторная проверка уже torified-хоста (сек), 0 = не перепроверять
+retorify_interval = 3600
+
+[tor]
+# Основной Tor для автоматически заблокированных сайтов
+socks_port = 9054
+control_port = 9055
+data_dir = "~/.config/torification/tor-data"
+torrc = "~/.config/torification/torrc"
+# Файл с проверенными мостами (порядок = приоритет после гонки)
+bridges_file = "~/.config/torification/bridges.txt"
+# Пул стран для ExitNodes после гонки мостов
+exit_countries = "{us},{de},{gb},{se},{fr},{nl},{ca},{au},{pl},{fi},{no}"
+
+[probe]
+# Таймаут TCP-handshake (SYN→SYN-ACK→ACK), мс
+connect_timeout_ms = 5000
+# HTTP-probe главной страницы (403/blank/Cloudflare)
+http_timeout_s = 15
+fail_threshold = 1
+fallback_socks_port = 9050
+check_url = "https://www.gstatic.com/generate_204"
+
+[pac]
+# Куда писать сгенерированный PAC (любой браузер: Chrome, Firefox, Edge…)
+output = "~/.config/torification/proxy.pac"
+# Статические правила (Telegram→:9050, YouTube→:9052, …) — из chrome-split-proxy
+static_rules = "~/.config/torification/static-rules.pac"
+# Локальный PAC-сервер (если включён)
+serve = true
+serve_port = 18767
+serve_url = "http://127.0.0.1:18767/proxy.pac"
+
+[ignore]
+# Сайты, с которыми daemon вообще не взаимодействует
+file = "~/.config/torification/torification-ignore"
+
+[browsers]
+# Процессы браузеров для мониторинга (browser-agnostic)
+process_names = ["chrome", "firefox", "chromium", "brave", "msedge", "opera"]
+# Дополнительно читать History SQLite (точнее hostname)
+use_history = true
+history_poll_interval = 5.0
+
+[ml]
+enabled = false
+model_path = "~/.local/state/torification/block_classifier.joblib"
+# Минимальная уверенность модели для автоматического torify
+confidence_threshold = 0.75
+# Каталог для сбора обучающих данных (JSONL)
+training_log = "~/.local/state/torification/training/events.jsonl"
+
+[udp]
+# Политика для UDP (см. config/udp-policy.toml.example)
+policy_file = "~/.config/torification/udp-policy.toml"

@@ -1,0 +1,14 @@
+[Unit]
+Description=Torification daemon — TCP probes, bridge races, dynamic PAC
+After=network-online.target torification-tor.service torification-pac.service
+Wants=torification-tor.service torification-pac.service
+
+[Service]
+Type=simple
+Environment=TORIFICATION_CONFIG=%h/.config/torification/torification.toml
+ExecStart=%h/.local/bin/torification daemon
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

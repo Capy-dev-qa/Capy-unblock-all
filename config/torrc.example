@@ -1,0 +1,16 @@
+SocksPort 127.0.0.1:9054
+DataDirectory /home/capy/.config/torification/tor-data
+Log notice file /home/capy/.local/state/torification/tor.log
+ControlPort 127.0.0.1:9055
+CookieAuthentication 1
+
+UseBridges 1
+ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy
+# Добавь мосты из BridgeDB или скопируй из ~/.config/tor-us/torrc
+Bridge obfs4 146.19.185.17:3873 0E31EA13CF35C3AB5EB9BB0E82E0A8982AE2A77C cert=bBD9F7gggyLD+v/NTZ6FfI0ywcHR7hmTu+IcoMhKKmzuMVzyOOhs3euYVJJgHxWDSqRofw iat-mode=0
+
+ClientTransportPlugin snowflake exec /usr/bin/snowflake-client -url https://1098762253.rsc.cdn77.org/ -front cdn.zk.mk -ice stun:stun.antisip.com:3478,stun:stun.epygi.com:3478 -log-to-state-dir
+Bridge snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72
+
+ExitNodes {us},{de},{gb},{se},{fr},{nl},{ca},{au},{pl},{fi},{no}
+StrictNodes 1
