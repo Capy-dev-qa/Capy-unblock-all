@@ -26,7 +26,7 @@ if [[ ! -f "$CFG/torrc" ]]; then
     sed "s|/tor-us/|/torification/|g; s|:9052|:9054|g; s|:9053|:9055|g" \
       "$HOME/.config/tor-us/torrc" > "$CFG/torrc"
   else
-    cp "$REPO/config/torrc.example" "$CFG/torrc"
+    sed "s|__HOME__|$HOME|g" "$REPO/config/torrc.example" > "$CFG/torrc"
   fi
   echo "Installed $CFG/torrc"
 fi
@@ -38,11 +38,30 @@ fi
 "$REPO/.venv/bin/pip" install -e "$REPO" -q
 ln -sf "$REPO/.venv/bin/torification" "$HOME/.local/bin/torification"
 ln -sf "$REPO/.venv/bin/torificationd" "$HOME/.local/bin/torificationd"
-chmod +x "$REPO/scripts/chrome-torification"
+chmod +x "$REPO/scripts/chrome-torification" "$REPO/scripts/torification-gui.py"
 ln -sf "$REPO/scripts/chrome-torification" "$HOME/.local/bin/chrome-torification"
+ln -sf "$REPO/scripts/torification-gui.py" "$HOME/.local/bin/torification-gui"
+
+install -d "$HOME/.local/share/applications"
+sed "s|__TORIFICATION_ROOT__|$REPO|g" "$REPO/scripts/torification-gui.desktop" \
+  > "$HOME/.local/share/applications/torification-gui.desktop"
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 mkdir -p "$HOME/.config/systemd/user"
-cp "$REPO/systemd/"*.service "$HOME/.config/systemd/user/"
+TOR_BIN="$(command -v tor 2>/dev/null || true)"
+if [[ -z "$TOR_BIN" ]]; then
+  for c in /usr/bin/tor /usr/sbin/tor; do
+    if [[ -x "$c" ]]; then
+      TOR_BIN="$c"
+      break
+    fi
+  done
+fi
+TOR_BIN="${TOR_BIN:-/usr/bin/tor}"
+for svc in "$REPO/systemd/"*.service; do
+  sed -e "s|__TORIFICATION_ROOT__|$REPO|g" -e "s|__TOR_BIN__|$TOR_BIN|g" \
+    "$svc" > "$HOME/.config/systemd/user/$(basename "$svc")"
+done
 systemctl --user daemon-reload
 systemctl --user enable torification-tor torification-pac torification 2>/dev/null || true
 
@@ -57,6 +76,7 @@ echo "Chrome:  Settings → System → Open proxy → Automatic / PAC"
 echo "Firefox: Settings → Network → Automatic proxy configuration URL"
 echo ""
 echo "Start:   systemctl --user enable --now torification-pac torification-tor torification"
+echo "GUI:     torification-gui     # или меню приложений → Torification"
 echo "Chrome:  chrome-torification https://example.com"
 echo "         (GUI proxy в Chrome на Linux Mint не работает — только флаг --proxy-pac-url)"
 echo "Ignore:  edit $CFG/torification-ignore"

@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/tor -f %h/.config/torification/torrc
+ExecStart=__TOR_BIN__ -f %h/.config/torification/torrc
 Restart=always
 RestartSec=5
 

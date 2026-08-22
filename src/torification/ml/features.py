@@ -78,7 +78,9 @@ def from_probes(
         state_onehot_tls_error=int(st == ProbeState.TLS_ERROR),
         state_onehot_ok=int(st in (ProbeState.OK, ProbeState.TLS_OK, ProbeState.TCP_OK, ProbeState.HTTP_OK)),
         direct_failed=int(st not in (ProbeState.OK, ProbeState.TLS_OK, ProbeState.TCP_OK, ProbeState.HTTP_OK)),
-        socks_ok=int(via_socks is not None and via_socks.state in (ProbeState.OK, ProbeState.TLS_OK, ProbeState.TCP_OK)),
+        socks_ok=int(via_socks is not None and via_socks.state in (
+            ProbeState.OK, ProbeState.TLS_OK, ProbeState.TCP_OK, ProbeState.HTTP_OK,
+        )),
         socks_latency_ms=via_socks.latency_ms if via_socks else 0.0,
         retry_count=retry_count,
         hour_of_day=datetime.datetime.now().hour,

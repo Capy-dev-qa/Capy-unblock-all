@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 from torification.connection_watcher import (
-    _browser_pids,
     _chrome_history_paths,
     _open_history_copy,
-    read_ss_pending_hosts,
+    read_ss_connections,
     resolve_ip_to_host,
 )
 from torification.netutil import is_asset_cdn_host, is_telegram_dc_ip, looks_like_ip
@@ -158,64 +156,49 @@ def read_urls_since(since_ts: float, limit: int = 10) -> list[str]:
     return urls
 
 
-def read_ss_active_ips(process_names: list[str]) -> list[str]:
-    import subprocess
-
-    pids = _browser_pids(process_names)
-    if not pids:
-        return []
+def _is_search_page(url: str) -> bool:
     try:
-        out = subprocess.check_output(["ss", "-H", "-tnp"], text=True, timeout=5)
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return []
-
-    ips: list[str] = []
-    for line in out.splitlines():
-        if "users:" not in line or "chrome" not in line:
-            continue
-        pid_match = re.search(r"pid=(\d+)", line)
-        if not pid_match or int(pid_match.group(1)) not in pids:
-            continue
-        cols = line.split()
-        if len(cols) < 5:
-            continue
-        if cols[0] not in ("ESTAB", "SYN-SENT", "SYN-RECV"):
-            continue
-        remote = cols[4]
-        if remote.startswith("127.") or ":9050" in remote or ":9054" in remote:
-            continue
-        if remote.startswith("["):
-            ip = remote.split("]")[0][1:]
-        else:
-            ip = remote.rsplit(":", 1)[0]
-        if is_telegram_dc_ip(ip) or is_asset_cdn_host(ip):
-            continue
-        ips.append(ip)
-    return ips
+        parsed = urlparse(url)
+        h = (parsed.hostname or "").lower().rstrip(".")
+        return h in SEARCH_ENGINES and "/search" in parsed.path
+    except Exception:
+        return False
 
 
-def discover_hosts(process_names: list[str], since_ts: float, dns_cache: dict[str, str]) -> Discovery:
-    """Только live TCP (ss). История Chrome — только search?q= пока открыт Google."""
+def discover_hosts(
+    process_names: list[str],
+    since_ts: float,
+    dns_cache: dict[str, str],
+    use_history: bool = True,
+) -> Discovery:
+    """Live TCP (ss) for any configured browser. History — только search?q= пока открыт Google."""
     active: set[str] = set()
     candidates: set[str] = set()
+    saw_search = False
 
-    for ev in read_ss_pending_hosts(process_names):
+    for ev in read_ss_connections(process_names):
         h = ev.host
+        if is_telegram_dc_ip(h):
+            continue
         if looks_like_ip(h):
             h = resolve_ip_to_host(h, dns_cache)
         h = h.lower().rstrip(".")
-        if h and h not in SEARCH_ENGINES and not is_asset_cdn_host(h):
-            active.add(h)
+        if not h or looks_like_ip(h) or is_asset_cdn_host(h):
+            continue
+        if h in SEARCH_ENGINES or _on_search_engine({h}):
+            saw_search = True
+            continue
+        active.add(h)
 
-    for ip in read_ss_active_ips(process_names):
-        h = resolve_ip_to_host(ip, dns_cache)
-        h = h.lower().rstrip(".")
-        if h and not looks_like_ip(h) and h not in SEARCH_ENGINES and not is_asset_cdn_host(h):
-            active.add(h)
-
-    if _on_search_engine(active):
-        for url in read_urls_since(since_ts, 10):
-            candidates.update(hosts_from_search_url(url))
+    recent_urls: list[str] = []
+    if use_history:
+        recent_urls = read_urls_since(since_ts, 10)
+        # Google через PAC = 127.0.0.1, ss его не видит — смотрим свежую историю.
+        if not saw_search:
+            saw_search = any(_is_search_page(u) for u in recent_urls)
+        if saw_search:
+            for url in recent_urls:
+                candidates.update(hosts_from_search_url(url))
 
     candidates -= active
     return Discovery(active=active, search_candidates=candidates)

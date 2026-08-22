@@ -42,7 +42,7 @@ reject_flag_args() {
   local a
   for a in "$@"; do
     case "$a" in
-      -*) echo "Аргument '$a' похож на флаг Chrome — передай URL без '-'." >&2; return 1 ;;
+      -*) echo "Аргумент '$a' похож на флаг Chrome — передай URL без '-'." >&2; return 1 ;;
     esac
   done
 }

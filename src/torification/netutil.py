@@ -36,7 +36,7 @@ def is_telegram_dc_ip(host: str) -> bool:
 
 
 def is_valid_hostname(host: str) -> bool:
-    """Reject garbage from ss (e.g. single digit '1')."""
+    """Reject garbage from ss (e.g. single digit '1', truncated IP '8.8')."""
     if not host or len(host) < 2:
         return False
     if host.isdigit():
@@ -44,6 +44,9 @@ def is_valid_hostname(host: str) -> bool:
     if looks_like_ip(host):
         return True
     if is_asset_cdn_host(host):
+        return False
+    # Real DNS names have at least one letter; "167.99" is a sliced IPv4.
+    if not re.search(r"[a-zA-Z]", host):
         return False
     return bool(re.match(r"^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$", host, re.I))
 
@@ -76,6 +79,7 @@ EC2_RDNS_SUFFIXES = (
 )
 
 CLOUD_INFRA_SUFFIXES = (
+    ".amazonaws.com",  # S3/API; магазин amazon.com не входит
     ".azurewebsites.net",
     ".blob.core.windows.net",
     ".azureedge.net",
@@ -129,7 +133,7 @@ MULTI_PART_SUFFIXES = frozenset({
 
 def registrable_domain(host: str) -> str:
     h = host.lower().rstrip(".")
-    if is_cloud_infra_host(h):
+    if looks_like_ip(h) or is_cloud_infra_host(h):
         return h
     parts = h.split(".")
     if len(parts) <= 2:
@@ -141,12 +145,29 @@ def registrable_domain(host: str) -> str:
 
 
 def related_torify_hosts(host: str) -> list[str]:
-    root = registrable_domain(host)
+    h = host.lower().rstrip(".")
+    root = registrable_domain(h)
     groups: dict[str, list[str]] = {
         "openai.com": ["openai.com", "chatgpt.com", "oaistatic.com"],
         "chatgpt.com": ["openai.com", "chatgpt.com", "oaistatic.com"],
         "amazon.com": ["amazon.com", "media-amazon.com", "ssl-images-amazon.com"],
     }
     if root in groups:
-        return groups[root]
-    return [root] if root == host else [root, host]
+        out = list(groups[root])
+        if h not in out:
+            out.append(h)
+        return out
+    return [root] if root == h else [root, h]
+
+
+def host_matches_active(host: str, active: set[str]) -> bool:
+    """True if this host (or its eTLD+1) is among live browser connections."""
+    if not host or not active:
+        return False
+    h = host.lower().rstrip(".")
+    if h in active:
+        return True
+    root = registrable_domain(h)
+    if root in active:
+        return True
+    return any(registrable_domain(a) == root for a in active)

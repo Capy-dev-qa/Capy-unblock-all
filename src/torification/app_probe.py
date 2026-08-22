@@ -5,8 +5,10 @@ TCP/TLS «ok» недостаточно — OpenAI/ChatGPT отдают tls_ok, 
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 
 BROWSER_UA = (
@@ -46,32 +48,47 @@ def _curl_probe(
     timeout_s: int = 15,
     socks_port: int | None = None,
 ) -> HttpProbeResult:
-    cmd = [
-        "curl", "-sS", "-L", "--max-time", str(timeout_s),
-        "-A", BROWSER_UA,
-        "-o", "/tmp/torification-probe-body",
-        "-w", "%{http_code} %{size_download} %{time_total}",
-        url,
-    ]
-    if socks_port is not None:
-        cmd = ["curl", "--socks5-hostname", f"127.0.0.1:{socks_port}"] + cmd[1:]
-
+    fd, body_path = tempfile.mkstemp(prefix="torification-probe-")
+    os.close(fd)
     try:
-        out = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=timeout_s + 3)
-        parts = out.strip().split()
-        status = int(parts[0]) if parts else 0
-        nbytes = int(float(parts[1])) if len(parts) > 1 else 0
-        latency = float(parts[2]) * 1000 if len(parts) > 2 else 0.0
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, IndexError) as e:
-        reason = "timeout" if "28" in str(e) else str(e)[:80]
-        return HttpProbeResult(False, 0, 0, reason)
+        cmd = [
+            "curl", "-sS", "-L", "--compressed", "--max-time", str(timeout_s),
+            "-A", BROWSER_UA,
+            "-o", body_path,
+            "-w", "%{http_code} %{size_download} %{time_total}",
+            url,
+        ]
+        if socks_port is not None:
+            cmd = ["curl", "--socks5-hostname", f"127.0.0.1:{socks_port}"] + cmd[1:]
 
-    try:
-        body = open("/tmp/torification-probe-body", "rb").read(65536).decode("utf-8", errors="replace")
-    except OSError:
-        body = ""
+        try:
+            out = subprocess.check_output(
+                cmd, text=True, stderr=subprocess.DEVNULL, timeout=timeout_s + 3,
+            )
+            parts = out.strip().split()
+            status = int(parts[0]) if parts else 0
+            nbytes = int(float(parts[1])) if len(parts) > 1 else 0
+            latency = float(parts[2]) * 1000 if len(parts) > 2 else 0.0
+        except subprocess.TimeoutExpired:
+            return HttpProbeResult(False, 0, 0, "timeout")
+        except subprocess.CalledProcessError as e:
+            reason = "timeout" if e.returncode == 28 else f"curl_{e.returncode}"
+            return HttpProbeResult(False, 0, 0, reason)
+        except (ValueError, IndexError) as e:
+            return HttpProbeResult(False, 0, 0, str(e)[:80])
 
-    return _classify_http(status, nbytes, body, latency)
+        try:
+            with open(body_path, "rb") as f:
+                body = f.read(65536).decode("utf-8", errors="replace")
+        except OSError:
+            body = ""
+
+        return _classify_http(status, nbytes, body, latency)
+    finally:
+        try:
+            os.unlink(body_path)
+        except OSError:
+            pass
 
 
 def _classify_http(status: int, nbytes: int, body: str, latency_ms: float) -> HttpProbeResult:
@@ -81,11 +98,13 @@ def _classify_http(status: int, nbytes: int, body: str, latency_ms: float) -> Ht
     if status >= 500:
         return HttpProbeResult(False, status, nbytes, f"http_{status}", latency_ms)
 
-    if status == 403 or status == 451:
+    # Geo/DPI/WAF: 403, 451; таймаут прокси 408/425; rate-limit 429.
+    if status in (403, 408, 425, 429, 451):
         return HttpProbeResult(False, status, nbytes, f"http_{status}", latency_ms)
 
-    if status >= 400:
-        return HttpProbeResult(False, status, nbytes, f"http_{status}", latency_ms)
+    # 401/404/405/410 — сайт отвечает, это не блокировка канала.
+    if 400 <= status < 500:
+        return HttpProbeResult(True, status, nbytes, "ok", latency_ms)
 
     if BLOCK_BODY_RE.search(body):
         return HttpProbeResult(False, status, nbytes, "block_body", latency_ms)

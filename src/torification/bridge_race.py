@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import socket
@@ -47,6 +46,21 @@ def parse_bridges(torrc_path: str | Path) -> list[Bridge]:
     return bridges
 
 
+def parse_transport_plugins(torrc_path: str | Path) -> dict[str, str]:
+    """Map transport name → full ClientTransportPlugin line from torrc."""
+    text = Path(torrc_path).expanduser().read_text(encoding="utf-8")
+    plugins: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("ClientTransportPlugin "):
+            continue
+        rest = stripped.split(None, 2)
+        if len(rest) < 2:
+            continue
+        plugins[rest[1]] = stripped
+    return plugins
+
+
 def _write_minimal_torrc(
     bridge: Bridge,
     data_dir: Path,
@@ -54,28 +68,39 @@ def _write_minimal_torrc(
     control_port: int,
     exit_countries: str,
     log_path: Path,
+    plugins: dict[str, str] | None = None,
 ) -> Path:
     data_dir.mkdir(parents=True, exist_ok=True)
-    plugins = ""
-    if "obfs4" in bridge.line:
-        plugins = "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy\n"
+    plugin_line = ""
+    if plugins and bridge.transport in plugins:
+        plugin_line = plugins[bridge.transport] + "\n"
+    elif "obfs4" in bridge.line:
+        plugin_line = "ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy\n"
     elif "snowflake" in bridge.line:
-        plugins = (
+        plugin_line = (
             "ClientTransportPlugin snowflake exec /usr/bin/snowflake-client "
-            "-url https://1098762253.rsc.cdn77.org/ -front cdn.zk.mk\n"
+            "-url https://1098762253.rsc.cdn77.org/ -front cdn.zk.mk "
+            "-ice stun:stun.antisip.com:3478,stun:stun.epygi.com:3478 "
+            "-log-to-state-dir\n"
         )
+    elif "meek" in bridge.line:
+        plugin_line = "ClientTransportPlugin meek_lite exec /usr/bin/obfs4proxy\n"
     body = f"""SocksPort 127.0.0.1:{socks_port}
 ControlPort 127.0.0.1:{control_port}
 DataDirectory {data_dir}
 Log notice file {log_path}
 UseBridges 1
-{plugins}{bridge.line}
+{plugin_line}{bridge.line}
 ExitNodes {exit_countries}
 StrictNodes 1
 """
     rc = data_dir / "torrc"
     rc.write_text(body, encoding="utf-8")
     return rc
+
+
+def _tor_binary() -> str:
+    return shutil.which("tor") or "/usr/sbin/tor"
 
 
 def _socks_ready(port: int, deadline: float) -> bool:
@@ -100,34 +125,45 @@ def _test_bridge(
     target_port: int,
     exit_countries: str,
     bootstrap_timeout: float,
+    plugins: dict[str, str] | None = None,
 ) -> RaceResult | None:
     socks = base_port + idx * 2
     ctrl = base_port + idx * 2 + 1
     tmp = Path(tempfile.mkdtemp(prefix=f"tor-race-{idx}-"))
     log = tmp / "tor.log"
-    torrc = _write_minimal_torrc(bridge, tmp / "data", socks, ctrl, exit_countries, log)
-    proc = subprocess.Popen(
-        ["/usr/sbin/tor", "-f", str(torrc)],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    proc: subprocess.Popen | None = None
     try:
+        torrc = _write_minimal_torrc(
+            bridge, tmp / "data", socks, ctrl, exit_countries, log, plugins,
+        )
+        proc = subprocess.Popen(
+            [_tor_binary(), "-f", str(torrc)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         if not _socks_ready(socks, time.time() + bootstrap_timeout):
             return None
-        # bootstrap check via generate_204
         r: ProbeResult = probe_via_socks("www.gstatic.com", 443, "127.0.0.1", socks, int(bootstrap_timeout * 1000))
         if r.state.value not in ("ok", "tcp_ok", "tls_ok", "http_ok"):
             return None
         tr = probe_via_socks(target_host, target_port, "127.0.0.1", socks, 20000)
         if tr.state.value not in ("ok", "tcp_ok", "tls_ok", "http_ok"):
             return None
-        return RaceResult(bridge=bridge, latency_ms=tr.latency_ms, rank=0)
+        from torification.app_probe import probe_site
+
+        app = probe_site(target_host, socks_ports=[socks], timeout_s=15)
+        if not app.via_socks or not app.via_socks.ok:
+            return None
+        return RaceResult(bridge=bridge, latency_ms=app.via_socks.latency_ms, rank=0)
+    except Exception:
+        return None
     finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        if proc is not None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
         shutil.rmtree(tmp, ignore_errors=True)
 
 
@@ -139,8 +175,11 @@ def race_bridges(
     base_port: int = 19200,
     bootstrap_timeout: float = 120.0,
     max_workers: int = 4,
+    plugins: dict[str, str] | None = None,
 ) -> list[RaceResult]:
     """Run bridges in parallel; return sorted by latency (fastest first)."""
+    if not bridges:
+        return []
     results: list[RaceResult] = []
     with ThreadPoolExecutor(max_workers=min(max_workers, len(bridges))) as ex:
         futs = {
@@ -153,11 +192,15 @@ def race_bridges(
                 target_port,
                 exit_countries,
                 bootstrap_timeout,
+                plugins,
             ): b
             for i, b in enumerate(bridges)
         }
         for fut in as_completed(futs):
-            res = fut.result()
+            try:
+                res = fut.result()
+            except Exception:
+                continue
             if res:
                 results.append(res)
     results.sort(key=lambda x: x.latency_ms)

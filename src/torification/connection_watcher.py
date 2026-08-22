@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import sqlite3
 import subprocess
 import tempfile
-import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -249,7 +250,7 @@ def read_ss_connections(process_names: list[str]) -> list[BrowserEvent]:
             continue
         state = cols[0]
         remote = cols[4]
-        if state not in ("ESTAB", "SYN-SENT", "FIN-WAIT-1", "FIN-WAIT-2"):
+        if state not in ("ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2"):
             continue
         if remote.startswith("127.") or remote.startswith("[::1]"):
             continue
@@ -261,17 +262,24 @@ def read_ss_connections(process_names: list[str]) -> list[BrowserEvent]:
     return events
 
 
-def resolve_ip_to_host(ip: str, cache: dict[str, str]) -> str:
+def resolve_ip_to_host(ip: str, cache: dict[str, str], timeout_s: float = 2.0) -> str:
     if ip in cache:
         return cache[ip]
-    if looks_like_ip(ip):
+    if not looks_like_ip(ip):
+        return ip
+    result = [ip]
+
+    def _lookup() -> None:
         try:
             import socket
 
             host, _, _ = socket.gethostbyaddr(ip)
-            cache[ip] = host.lower()
-            return cache[ip]
+            result[0] = host.lower()
         except OSError:
-            cache[ip] = ip
-            return ip
-    return ip
+            result[0] = ip
+
+    t = threading.Thread(target=_lookup, daemon=True)
+    t.start()
+    t.join(timeout_s)
+    cache[ip] = result[0]
+    return cache[ip]
