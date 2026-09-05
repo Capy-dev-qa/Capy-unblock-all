@@ -53,6 +53,16 @@ aur_hint() {
   echo "  lyrebird тоже ок, если уже стоит (это новый obfs4proxy)."
 }
 
+comment_torrc() {
+  local torrc="$1" pat="$2"
+  sed -i -E "s/^($pat)/# \\1/" "$torrc"
+}
+
+uncomment_torrc() {
+  local torrc="$1" pat="$2"
+  sed -i -E "s/^#[[:space:]]*($pat)/\\1/" "$torrc"
+}
+
 patch_torrc_plugins() {
   local torrc="$1"
   [[ -f "$torrc" ]] || return 0
@@ -60,16 +70,29 @@ patch_torrc_plugins() {
   obfs="$(find_bin lyrebird obfs4proxy || true)"
   snow="$(find_bin snowflake-client snowflake-pt-client snowflake || true)"
   if [[ -n "$obfs" ]]; then
+    uncomment_torrc "$torrc" "ClientTransportPlugin obfs4 exec"
+    uncomment_torrc "$torrc" "Bridge obfs4 "
+    uncomment_torrc "$torrc" "UseBridges "
     sed -i -E "s|^(ClientTransportPlugin obfs4 exec)[[:space:]]+[^[:space:]]+|\\1 $obfs|" "$torrc"
     echo "obfs4 plugin: $obfs"
   else
-    echo "WARNING: no lyrebird/obfs4proxy in PATH — Tor bridges will fail until you install AUR obfs4proxy" >&2
+    comment_torrc "$torrc" "ClientTransportPlugin obfs4 exec"
+    comment_torrc "$torrc" "Bridge obfs4 "
+    echo "WARNING: no lyrebird/obfs4proxy — obfs4 bridges disabled. Install AUR: yay -S obfs4proxy" >&2
   fi
   if [[ -n "$snow" ]]; then
+    uncomment_torrc "$torrc" "ClientTransportPlugin snowflake exec"
+    uncomment_torrc "$torrc" "Bridge snowflake "
     sed -i -E "s|^(ClientTransportPlugin snowflake exec)[[:space:]]+[^[:space:]]+|\\1 $snow|" "$torrc"
     echo "snowflake plugin: $snow"
   else
-    echo "Note: snowflake-client not found (optional). Install AUR snowflake-pt-client if you use snowflake bridges."
+    comment_torrc "$torrc" "ClientTransportPlugin snowflake exec"
+    comment_torrc "$torrc" "Bridge snowflake "
+    echo "Note: snowflake-client not found — snowflake bridges disabled."
+  fi
+  if [[ -z "$obfs" && -z "$snow" ]]; then
+    comment_torrc "$torrc" "UseBridges "
+    echo "WARNING: no pluggable transports. Tor starts without bridges (may fail on censored ISP)." >&2
   fi
 }
 

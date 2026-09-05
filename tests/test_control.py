@@ -23,6 +23,21 @@ def test_status_all_uses_systemctl(monkeypatch):
     assert all_running(rows) is False
 
 
+def test_start_all_resets_failed_then_starts(monkeypatch):
+    calls: list[tuple[str, ...]] = []
+
+    def fake(*args, timeout=15):
+        calls.append(args)
+        return CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("torification.control._systemctl", fake)
+    monkeypatch.setattr("torification.control._apply_cursor_proxy_safe", lambda: None)
+    start_all()
+    assert calls[0][0] == "reset-failed"
+    assert calls[1][0] == "start"
+    assert "torification-tor.service" in calls[1]
+
+
 def test_start_all_passes_units(monkeypatch):
     seen = {}
 

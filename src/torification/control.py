@@ -68,10 +68,51 @@ def autostart_enabled(rows: list[ServiceStatus] | None = None) -> bool:
 
 
 def start_all() -> subprocess.CompletedProcess[str]:
+    _systemctl("reset-failed", *SERVICES)
     r = _systemctl("start", *SERVICES, timeout=30)
     if r.returncode == 0:
         _apply_cursor_proxy_safe()
+        return r
+    detail = start_failure_detail()
+    if detail:
+        r = subprocess.CompletedProcess(r.args, r.returncode, r.stdout or "", detail)
     return r
+
+
+def start_failure_detail() -> str:
+    """Короткий текст из journal/status, чтобы GUI не показывал только start-limit."""
+    chunks: list[str] = []
+    status = _systemctl("status", "torification-tor.service", "--no-pager", "-l", timeout=8)
+    text = (status.stdout or "") + (status.stderr or "")
+    if "start-limit" in text.lower() or "Start request repeated" in text:
+        chunks.append(
+            "Tor не стартанул (часто нет obfs4proxy/lyrebird из AUR). "
+            "Поставь: yay -S obfs4proxy   затем снова install.sh и Запустить."
+        )
+    try:
+        log = subprocess.run(
+            ["journalctl", "--user", "-u", "torification-tor.service", "-n", "12", "--no-pager", "-q"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return "\n".join(chunks)[:500]
+    lines = [ln.strip() for ln in (log.stdout or "").splitlines() if ln.strip()]
+    interesting = [
+        ln
+        for ln in lines
+        if any(
+            k in ln.lower()
+            for k in ("error", "fail", "could not", "no such", "obfs", "snowflake", "lyrebird", "plugin")
+        )
+    ]
+    if interesting:
+        chunks.append(interesting[-1][:240])
+    elif lines:
+        chunks.append(lines[-1][:240])
+    return "\n".join(chunks)[:500]
 
 
 def stop_all() -> subprocess.CompletedProcess[str]:

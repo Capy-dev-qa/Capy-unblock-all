@@ -6,8 +6,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=__TOR_BIN__ -f %h/.config/torification/torrc
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=8
+StartLimitIntervalSec=120
+StartLimitBurst=8
 
 [Install]
 WantedBy=default.target
