@@ -170,4 +170,4 @@ echo "  НЕ включай torification-gui через systemctl — это о�
 echo "  fish:  exec fish    # подхватит ~/.local/bin"
 echo "  Cursor при «Запустить» в GUI: http.proxy → :18768 → Tor :9054"
 echo "  PAC:   http://127.0.0.1:18767/proxy.pac"
-echo "  Ignore: $CFG/torification-ignore"
+echo "  Команды копипастой: $REPO/ARCH.txt"
