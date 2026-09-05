@@ -17,6 +17,7 @@ from torification.control import (  # noqa: E402
     all_running,
     autostart_enabled,
     chrome_launcher,
+    cursor_through_tor,
     set_autostart,
     start_all,
     status_all,
@@ -50,6 +51,7 @@ def _run_gtk() -> None:
             hint.set_markup(
                 '<span size="small" foreground="#666666">'
                 "Пока сервисы включены, они живут до выключения ПК или кнопки «Стоп». "
+                "Cursor IDE при «Запустить» идёт через Tor. "
                 "После входа в систему поднимаются сами, если включён автозапуск."
                 "</span>"
             )
@@ -120,6 +122,11 @@ def _run_gtk() -> None:
             self.btn_start.set_sensitive(not running)
             self.btn_stop.set_sensitive(any(s.active for s in rows))
             self.btn_chrome.set_sensitive(bool(chrome_launcher()))
+            if running and cursor_through_tor():
+                self.headline.set_markup(
+                    '<span size="x-large"><b>●  Работает</b></span>'
+                    '  <span size="small" foreground="#2e7d32">Cursor → Tor</span>'
+                )
             self._auto_guard = True
             self.auto.set_active(autostart_enabled(rows))
             self._auto_guard = False
@@ -168,7 +175,7 @@ def _run_tk() -> None:
     tk.Label(
         root,
         text="Пока сервисы включены, они живут до выключения ПК или «Стоп».\n"
-        "После входа в систему поднимаются сами, если включён автозапуск.",
+        "Cursor IDE при «Запустить» идёт через Tor. Автозапуск — после входа.",
         justify="left",
         fg="#555",
     ).grid(row=1, column=0, columnspan=2, sticky="w", padx=16, pady=(0, 8))
@@ -188,7 +195,8 @@ def _run_tk() -> None:
         rows = status_all()
         running = all_running(rows)
         if running:
-            headline.config(text="●  Работает", fg="#2e7d32")
+            extra = "  · Cursor → Tor" if cursor_through_tor() else ""
+            headline.config(text="●  Работает" + extra, fg="#2e7d32")
         elif any(s.active for s in rows):
             headline.config(text="●  Частично", fg="#ef6c00")
         else:
@@ -227,7 +235,7 @@ def _run_tk() -> None:
         err.set("" if r.returncode == 0 else (r.stderr or r.stdout or "ошибка автозапуска"))
         refresh()
 
-    btn_row = 5
+    btn_row = 2 + len(row_vars)
     btn_start = ttk.Button(root, text="Запустить", command=on_start)
     btn_stop = ttk.Button(root, text="Остановить", command=on_stop)
     btn_chrome = ttk.Button(root, text="Chrome с PAC", command=on_chrome)

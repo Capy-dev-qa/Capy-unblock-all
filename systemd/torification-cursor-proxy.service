@@ -1,0 +1,16 @@
+[Unit]
+Description=Torification HTTP CONNECT proxy for Cursor (tunnels to Tor SOCKS)
+After=network.target torification-tor.service
+Wants=torification-tor.service
+
+[Service]
+Type=simple
+Environment=TORIFICATION_CONFIG=%h/.config/torification/torification.toml
+Environment=TORIFICATION_CURSOR_PROXY=127.0.0.1:18768
+Environment=TORIFICATION_SOCKS=127.0.0.1:9054
+ExecStart=__TORIFICATION_ROOT__/.venv/bin/python3 -m torification.http_socks_proxy
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

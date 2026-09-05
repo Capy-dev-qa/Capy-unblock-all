@@ -5,17 +5,20 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 SERVICES = (
     "torification-tor.service",
     "torification-pac.service",
     "torification.service",
+    "torification-cursor-proxy.service",
 )
 
 LABELS = {
     "torification-tor.service": "Tor :9054",
     "torification-pac.service": "PAC-сервер",
     "torification.service": "Демон",
+    "torification-cursor-proxy.service": "Cursor → Tor",
 }
 
 
@@ -65,11 +68,64 @@ def autostart_enabled(rows: list[ServiceStatus] | None = None) -> bool:
 
 
 def start_all() -> subprocess.CompletedProcess[str]:
-    return _systemctl("start", *SERVICES, timeout=30)
+    r = _systemctl("start", *SERVICES, timeout=30)
+    if r.returncode == 0:
+        _apply_cursor_proxy_safe()
+    return r
 
 
 def stop_all() -> subprocess.CompletedProcess[str]:
+    _restore_cursor_proxy_safe()
     return _systemctl("stop", *SERVICES, timeout=30)
+
+
+def _apply_cursor_proxy_safe() -> None:
+    try:
+        _wait_local_port(18768, timeout_s=8.0)
+        from torification.cursor_proxy import apply_cursor_proxy
+
+        apply_cursor_proxy()
+    except Exception:
+        pass
+
+
+def _restore_cursor_proxy_safe() -> None:
+    try:
+        from torification.cursor_proxy import restore_cursor_proxy
+
+        restore_cursor_proxy()
+    except Exception:
+        pass
+
+
+def _wait_local_port(port: int, timeout_s: float = 8.0) -> bool:
+    import socket
+    import time
+
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        sock = socket.socket()
+        sock.settimeout(0.3)
+        try:
+            sock.connect(("127.0.0.1", port))
+            return True
+        except OSError:
+            time.sleep(0.2)
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+    return False
+
+
+def cursor_through_tor() -> bool:
+    try:
+        from torification.cursor_proxy import cursor_proxy_status
+
+        return cursor_proxy_status().applied
+    except Exception:
+        return False
 
 
 def set_autostart(enabled: bool) -> subprocess.CompletedProcess[str]:
@@ -82,7 +138,5 @@ def chrome_launcher() -> str | None:
     path = shutil.which("chrome-torification")
     if path:
         return path
-    from pathlib import Path
-
     home = Path.home() / ".local/bin/chrome-torification"
     return str(home) if home.is_file() else None

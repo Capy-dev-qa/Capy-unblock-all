@@ -31,9 +31,43 @@ def test_start_all_passes_units(monkeypatch):
         return CompletedProcess(args, 0, "", "")
 
     monkeypatch.setattr("torification.control._systemctl", fake)
+    monkeypatch.setattr("torification.control._apply_cursor_proxy_safe", lambda: None)
     start_all()
     assert seen["args"][0] == "start"
     assert "torification.service" in seen["args"]
+    assert "torification-cursor-proxy.service" in seen["args"]
+
+
+def test_start_all_applies_cursor_proxy(monkeypatch):
+    seen = {"apply": 0}
+
+    def fake(*args, timeout=15):
+        return CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("torification.control._systemctl", fake)
+    monkeypatch.setattr(
+        "torification.control._apply_cursor_proxy_safe",
+        lambda: seen.__setitem__("apply", seen["apply"] + 1),
+    )
+    start_all()
+    assert seen["apply"] == 1
+
+
+def test_stop_all_restores_cursor_proxy(monkeypatch):
+    seen = {"restore": 0}
+
+    def fake(*args, timeout=15):
+        return CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("torification.control._systemctl", fake)
+    monkeypatch.setattr(
+        "torification.control._restore_cursor_proxy_safe",
+        lambda: seen.__setitem__("restore", seen["restore"] + 1),
+    )
+    from torification.control import stop_all
+
+    stop_all()
+    assert seen["restore"] == 1
 
 
 def test_set_autostart_enable_disable(monkeypatch):

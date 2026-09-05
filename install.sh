@@ -1,12 +1,88 @@
 #!/usr/bin/env bash
-# Install torification to ~/.config/torification
+# Install torification. Works from any cwd: bash /path/to/install.sh
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 CFG="$HOME/.config/torification"
 STATE="$HOME/.local/state/torification"
+LOCAL_BIN="$HOME/.local/bin"
 
-install -d -m 700 "$CFG" "$STATE" "$CFG/tor-data"
+if [[ ! -f "$REPO/pyproject.toml" || ! -d "$REPO/src/torification" ]]; then
+  echo "install.sh must live in the torification directory (found: $REPO)" >&2
+  echo "On Arch find it with:" >&2
+  echo "  find /run/media /media /mnt /home -name install.sh 2>/dev/null | grep -i torif" >&2
+  exit 1
+fi
+
+is_arch() { [[ -f /etc/arch-release ]]; }
+
+find_bin() {
+  local n
+  for n in "$@"; do
+    if command -v "$n" >/dev/null 2>&1; then
+      command -v "$n"
+      return 0
+    fi
+    for c in "/usr/bin/$n" "/usr/sbin/$n" "/usr/local/bin/$n"; do
+      if [[ -x "$c" ]]; then
+        echo "$c"
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+aur_hint() {
+  echo ""
+  echo "=== Arch: мосты Tor (AUR, не pacman) ==="
+  echo "  obfs4proxy и snowflake НЕТ в официальных репах."
+  echo "  sudo pacman -S --needed python python-pip python-gobject gtk3 tk tor libnotify git base-devel go"
+  if command -v yay >/dev/null 2>&1; then
+    echo "  yay -S --needed obfs4proxy snowflake-pt-client"
+  elif command -v paru >/dev/null 2>&1; then
+    echo "  paru -S --needed obfs4proxy snowflake-pt-client"
+  else
+    echo "  # yay нет — поставь AUR-пакеты так:"
+    echo "  sudo pacman -S --needed base-devel git go"
+    echo "  git clone https://aur.archlinux.org/obfs4proxy.git /tmp/obfs4proxy"
+    echo "  (cd /tmp/obfs4proxy && makepkg -si --noconfirm)"
+    echo "  git clone https://aur.archlinux.org/snowflake-pt-client.git /tmp/snowflake-pt-client"
+    echo "  (cd /tmp/snowflake-pt-client && makepkg -si --noconfirm)"
+  fi
+  echo "  lyrebird тоже ок, если уже стоит (это новый obfs4proxy)."
+}
+
+patch_torrc_plugins() {
+  local torrc="$1"
+  [[ -f "$torrc" ]] || return 0
+  local obfs snow
+  obfs="$(find_bin lyrebird obfs4proxy || true)"
+  snow="$(find_bin snowflake-client snowflake-pt-client snowflake || true)"
+  if [[ -n "$obfs" ]]; then
+    sed -i -E "s|^(ClientTransportPlugin obfs4 exec)[[:space:]]+[^[:space:]]+|\\1 $obfs|" "$torrc"
+    echo "obfs4 plugin: $obfs"
+  else
+    echo "WARNING: no lyrebird/obfs4proxy in PATH — Tor bridges will fail until you install AUR obfs4proxy" >&2
+  fi
+  if [[ -n "$snow" ]]; then
+    sed -i -E "s|^(ClientTransportPlugin snowflake exec)[[:space:]]+[^[:space:]]+|\\1 $snow|" "$torrc"
+    echo "snowflake plugin: $snow"
+  else
+    echo "Note: snowflake-client not found (optional). Install AUR snowflake-pt-client if you use snowflake bridges."
+  fi
+}
+
+ensure_fish_path() {
+  local conf="$HOME/.config/fish/conf.d/torification.fish"
+  mkdir -p "$(dirname "$conf")"
+  if [[ ! -f "$conf" ]] || ! grep -q 'local/bin' "$conf" 2>/dev/null; then
+    printf 'fish_add_path -g %s\n' "$LOCAL_BIN" > "$conf"
+    echo "fish PATH: $conf → $LOCAL_BIN"
+  fi
+}
+
+install -d -m 700 "$CFG" "$STATE" "$CFG/tor-data" "$LOCAL_BIN"
 
 for f in torification.toml.example torification-ignore udp-policy.toml.example static-rules.pac; do
   src="$REPO/config/${f}"
@@ -20,7 +96,6 @@ for f in torification.toml.example torification-ignore udp-policy.toml.example s
   fi
 done
 
-# torrc from tor-us if present
 if [[ ! -f "$CFG/torrc" ]]; then
   if [[ -f "$HOME/.config/tor-us/torrc" ]]; then
     sed "s|/tor-us/|/torification/|g; s|:9052|:9054|g; s|:9053|:9055|g" \
@@ -30,53 +105,46 @@ if [[ ! -f "$CFG/torrc" ]]; then
   fi
   echo "Installed $CFG/torrc"
 fi
+patch_torrc_plugins "$CFG/torrc"
 
-# Python: только venv (PEP 668 — system pip недоступен)
 if [[ ! -d "$REPO/.venv" ]]; then
   python3 -m venv "$REPO/.venv"
 fi
 "$REPO/.venv/bin/pip" install -e "$REPO" -q
-ln -sf "$REPO/.venv/bin/torification" "$HOME/.local/bin/torification"
-ln -sf "$REPO/.venv/bin/torificationd" "$HOME/.local/bin/torificationd"
+ln -sf "$REPO/.venv/bin/torification" "$LOCAL_BIN/torification"
+ln -sf "$REPO/.venv/bin/torificationd" "$LOCAL_BIN/torificationd"
 chmod +x "$REPO/scripts/chrome-torification" "$REPO/scripts/torification-gui.py"
-ln -sf "$REPO/scripts/chrome-torification" "$HOME/.local/bin/chrome-torification"
-ln -sf "$REPO/scripts/torification-gui.py" "$HOME/.local/bin/torification-gui"
+ln -sf "$REPO/scripts/chrome-torification" "$LOCAL_BIN/chrome-torification"
+ln -sf "$REPO/scripts/torification-gui.py" "$LOCAL_BIN/torification-gui"
+ensure_fish_path
 
 install -d "$HOME/.local/share/applications"
-sed "s|__TORIFICATION_ROOT__|$REPO|g" "$REPO/scripts/torification-gui.desktop" \
+PY3="$(command -v python3 || echo /usr/bin/python3)"
+sed -e "s|__TORIFICATION_ROOT__|$REPO|g" -e "s|/usr/bin/python3|$PY3|g" \
+  "$REPO/scripts/torification-gui.desktop" \
   > "$HOME/.local/share/applications/torification-gui.desktop"
 update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
 
 mkdir -p "$HOME/.config/systemd/user"
-TOR_BIN="$(command -v tor 2>/dev/null || true)"
-if [[ -z "$TOR_BIN" ]]; then
-  for c in /usr/bin/tor /usr/sbin/tor; do
-    if [[ -x "$c" ]]; then
-      TOR_BIN="$c"
-      break
-    fi
-  done
-fi
+TOR_BIN="$(find_bin tor || true)"
 TOR_BIN="${TOR_BIN:-/usr/bin/tor}"
 for svc in "$REPO/systemd/"*.service; do
   sed -e "s|__TORIFICATION_ROOT__|$REPO|g" -e "s|__TOR_BIN__|$TOR_BIN|g" \
     "$svc" > "$HOME/.config/systemd/user/$(basename "$svc")"
 done
-systemctl --user daemon-reload
-systemctl --user enable torification-tor torification-pac torification 2>/dev/null || true
+systemctl --user daemon-reload 2>/dev/null || true
+systemctl --user enable torification-tor torification-pac torification torification-cursor-proxy 2>/dev/null || true
+
+if is_arch; then
+  aur_hint
+fi
 
 echo ""
-echo "=== Автозапуск (один раз) ==="
-echo "  systemctl --user enable --now torification-tor torification-pac torification"
-echo "  sudo systemctl enable tor   # Telegram/OpenAI fallback :9050"
-echo "=== Browser setup (any browser) ==="
-echo "PAC URL: http://127.0.0.1:18767/proxy.pac"
-echo ""
-echo "Chrome:  Settings → System → Open proxy → Automatic / PAC"
-echo "Firefox: Settings → Network → Automatic proxy configuration URL"
-echo ""
-echo "Start:   systemctl --user enable --now torification-pac torification-tor torification"
-echo "GUI:     torification-gui     # или меню приложений → Torification"
-echo "Chrome:  chrome-torification https://example.com"
-echo "         (GUI proxy в Chrome на Linux Mint не работает — только флаг --proxy-pac-url)"
-echo "Ignore:  edit $CFG/torification-ignore"
+echo "=== Установлено из $REPO ==="
+echo "  GUI:   $LOCAL_BIN/torification-gui     (не systemd-юнит!)"
+echo "  Start: systemctl --user enable --now torification-tor torification-pac torification torification-cursor-proxy"
+echo "  НЕ включай torification-gui через systemctl — это окно, не сервис."
+echo "  fish:  exec fish    # подхватит ~/.local/bin"
+echo "  Cursor при «Запустить» в GUI: http.proxy → :18768 → Tor :9054"
+echo "  PAC:   http://127.0.0.1:18767/proxy.pac"
+echo "  Ignore: $CFG/torification-ignore"
