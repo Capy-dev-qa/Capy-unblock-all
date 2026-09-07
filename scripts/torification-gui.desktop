@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Torification
+Name[ru]=Torification
+Comment=Start and stop adaptive Tor routing
+Comment[ru]=Запуск и остановка обхода блокировок
+Exec=/usr/bin/python3 __TORIFICATION_ROOT__/scripts/torification-gui.py
+Icon=network-vpn
+Terminal=false
+Categories=Network;Security;
+StartupNotify=true
+Keywords=tor;proxy;pac;

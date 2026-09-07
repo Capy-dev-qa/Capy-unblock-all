@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 
@@ -29,9 +30,15 @@ def load_torified(state_file: Path) -> dict[str, dict]:
         return {}
 
 
+def _atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(content, encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def save_torified(state_file: Path, data: dict[str, dict]) -> None:
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    state_file.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    _atomic_write(state_file, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
 
 
 def generate_pac(
@@ -60,9 +67,13 @@ def generate_pac(
         idx = static.rfind(marker)
         if idx != -1:
             return static[:idx] + dynamic_block + "\n    " + static[idx:]
+        close = static.rfind("}")
+        if close != -1:
+            if dynamic_block:
+                return static[:close] + dynamic_block + "\n" + static[close:]
+            return static
     return PAC_HEADER + dynamic_block + PAC_FOOTER
 
 
 def write_pac(output: Path, content: str) -> None:
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(content, encoding="utf-8")
+    _atomic_write(output, content)

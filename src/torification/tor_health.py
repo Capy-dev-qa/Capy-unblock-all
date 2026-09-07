@@ -42,18 +42,21 @@ def signal_newnym(control_port: int, cookie_path: Path) -> bool:
     try:
         import binascii
 
-        from torification.bridge_race import parse_bridges  # noqa: F401
-
         cookie = binascii.hexlify(cookie_path.read_bytes()).decode()
         s = socket.create_connection(("127.0.0.1", control_port), timeout=10)
-        f = s.makefile("rw", encoding="utf-8", newline="\r\n")
-        f.write(f"AUTHENTICATE {cookie}\r\n")
-        f.flush()
-        f.readline()
-        f.write("SIGNAL NEWNYM\r\n")
-        f.flush()
-        line = f.readline()
-        s.close()
-        return line.startswith("250")
+        try:
+            # newline="" — иначе makefile сам добавит \r\n к уже указанному \r\n → \r\r\n
+            f = s.makefile("rw", encoding="utf-8", newline="")
+            f.write(f"AUTHENTICATE {cookie}\r\n")
+            f.flush()
+            auth = f.readline()
+            if not auth.startswith("250"):
+                return False
+            f.write("SIGNAL NEWNYM\r\n")
+            f.flush()
+            line = f.readline()
+            return line.startswith("250")
+        finally:
+            s.close()
     except OSError:
         return False

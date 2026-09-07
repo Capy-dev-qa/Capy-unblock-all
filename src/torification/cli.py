@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 
-from torification.bridge_race import parse_bridges, race_bridges, apply_winning_bridge
+from torification.bridge_race import parse_bridges, race_bridges, apply_winning_bridge, parse_transport_plugins
 from torification.config import load_config
 from torification.pac_generator import generate_pac, load_torified, write_pac
 from torification.tcp_probe import probe_tcp, is_blocked
@@ -33,7 +34,12 @@ def race_cmd() -> None:
 
     torrc = Path(args.torrc).expanduser()
     bridges = parse_bridges(torrc)
-    results = race_bridges(bridges, args.host, exit_countries=cfg["tor"]["exit_countries"])
+    results = race_bridges(
+        bridges,
+        args.host,
+        exit_countries=cfg["tor"]["exit_countries"],
+        plugins=parse_transport_plugins(torrc),
+    )
     if not results:
         print("No working bridge found")
         sys.exit(1)
@@ -119,19 +125,24 @@ def fix_cmd() -> None:
     from torification.daemon import TorificationDaemon
 
     d = TorificationDaemon(cfg)
-    d.fix_host(args.host)
-    app = probe_site(args.host, d._socks_ports)
-    print(f"=== after fix: {args.host} ===")
+    host = args.host.lower().strip()
+    d.fix_host(host)
+    app = probe_site(host, d._socks_ports)
+    print(f"=== after fix: {host} ===")
     print(f"  direct: {app.direct.ok} ({app.direct.reason})")
-    print(f"  in_pac: {args.host in open(Path(cfg['pac']['output']).expanduser()).read()}")
-    if args.host in d.torified:
-        print(f"  torified: port {d.torified[args.host].get('port', '?')}")
+    pac_path = Path(cfg["pac"]["output"]).expanduser()
+    pac_text = pac_path.read_text(encoding="utf-8") if pac_path.is_file() else ""
+    needle = f'host === "{host}"'
+    print(f"  in_pac: {needle in pac_text}")
+    meta = d.torified.get(host)
+    if meta:
+        print(f"  torified: port {meta.get('port', '?')}")
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     if len(sys.argv) < 2:
-        print("Usage: torification {probe|check|fix|race|pac|train|daemon|status} ...")
+        print("Usage: torification {probe|check|fix|race|pac|train|daemon|status|gui} ...")
         sys.exit(1)
     cmd = sys.argv[1]
     sys.argv = sys.argv[1:]
@@ -153,6 +164,11 @@ def main() -> None:
         check_cmd()
     elif cmd == "status":
         status_cmd()
+    elif cmd == "gui":
+        from pathlib import Path
+
+        script = Path(__file__).resolve().parents[2] / "scripts" / "torification-gui.py"
+        os.execv(sys.executable, [sys.executable, str(script)])
     else:
         print(f"Unknown command: {cmd}")
         sys.exit(1)

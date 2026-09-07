@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import fcntl
 import logging
+import os
 import subprocess
 import threading
 import time
 from pathlib import Path
 
 from torification.app_probe import probe_site
-from torification.bridge_race import apply_winning_bridge, parse_bridges, race_bridges
+from torification.bridge_race import apply_winning_bridge, parse_bridges, parse_transport_plugins, race_bridges
 from torification.config import load_config, state_dir
 from torification.adapt import classify_block
 from torification.discover import discover_hosts
@@ -24,6 +26,7 @@ from torification.netutil import (
     looks_like_ip,
     related_torify_hosts,
     registrable_domain,
+    host_matches_active,
 )
 from torification.pac_generator import generate_pac, load_torified, save_torified, write_pac
 from torification.tcp_probe import is_blocked, probe_tcp, probe_via_socks
@@ -48,7 +51,9 @@ class TorificationDaemon:
         self.ml_enabled = bool(ml_cfg.get("enabled"))
         self.ml_threshold = float(ml_cfg.get("confidence_threshold", 0.75))
         self.training_log = ml_cfg.get("training_log", "")
+        self._lock = threading.Lock()
         self._race_lock_path = self.state / "bridge-race.lock"
+        self._race_lock_fd = None
         self._race_thread: threading.Thread | None = None
         self._active_hosts: set[str] = set()
         self._race_cooldown: dict[str, float] = {}
@@ -74,7 +79,7 @@ class TorificationDaemon:
         self.ignore = load_ignore(self.cfg["ignore"]["file"])
 
     def _should_skip(self, host: str) -> bool:
-        if is_telegram_dc_ip(host):
+        if looks_like_ip(host) or is_telegram_dc_ip(host):
             return True
         if is_asset_cdn_host(host):
             return True
@@ -82,8 +87,6 @@ class TorificationDaemon:
             return True
         if self.ignore.matches_host(host) or self.ignore.matches_ip(host):
             return True
-        if looks_like_ip(host):
-            return self.ignore.matches_ip(host)
         return False
 
     def _refresh_pac(self) -> None:
@@ -115,21 +118,41 @@ class TorificationDaemon:
 
     def _torify_hosts(self, hosts: list[str], port: int, reason: str, latency_ms: float | None = None) -> None:
         now = time.time()
-        for h in hosts:
-            self.torified[h] = {
-                "since": now,
-                "port": port,
-                "reason": reason,
-                "bridge_latency_ms": latency_ms,
-            }
-        save_torified(self.torified_file, self.torified)
-        self._refresh_pac()
-        root = hosts[0] if hosts else "?"
+        added: list[str] = []
+        with self._lock:
+            for h in hosts:
+                if self._should_skip(h) or looks_like_ip(h):
+                    continue
+                self.torified[h] = {
+                    "since": now,
+                    "port": port,
+                    "reason": reason,
+                    "bridge_latency_ms": latency_ms,
+                }
+                added.append(h)
+            if not added:
+                return
+            save_torified(self.torified_file, self.torified)
+            self._refresh_pac()
+        root = added[0]
         self._notify(
             "Сайт разблокирован",
             f"{root} → Tor :{port}. Обнови вкладку: Ctrl+Shift+R",
         )
-        log.info("Torified %s (port %s): %s", hosts, port, reason)
+        log.info("Torified %s (port %s): %s", added, port, reason)
+
+    def _untorify_hosts(self, hosts: list[str]) -> None:
+        removed: list[str] = []
+        with self._lock:
+            for h in hosts:
+                if h in self.torified:
+                    del self.torified[h]
+                    removed.append(h)
+            if not removed:
+                return
+            save_torified(self.torified_file, self.torified)
+            self._refresh_pac()
+        log.info("Untorified %s — direct OK", removed)
 
     def _socks_port_from_probe(self, reason: str) -> int:
         if "@:" in reason:
@@ -139,10 +162,42 @@ class TorificationDaemon:
                 pass
         return int(self.cfg["tor"]["socks_port"])
 
+    def _try_acquire_race_lock(self) -> bool:
+        fd = None
+        try:
+            self._race_lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = open(self._race_lock_path, "w", encoding="utf-8")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fd.write(str(os.getpid()))
+            fd.flush()
+            self._race_lock_fd = fd
+            return True
+        except OSError:
+            if fd is not None:
+                try:
+                    fd.close()
+                except OSError:
+                    pass
+            return False
+
+    def _release_race_lock(self) -> None:
+        fd = self._race_lock_fd
+        self._race_lock_fd = None
+        if fd is None:
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            fd.close()
+        except OSError:
+            pass
+
     def _race_and_torify(self, host: str) -> bool:
         if not is_valid_hostname(host) or looks_like_ip(host):
             return False
-        if host not in self._active_hosts:
+        if not host_matches_active(host, self._active_hosts):
             log.info("Skip bridge race for %s — not open in browser", host)
             return False
         cooldown = float(self.cfg.get("general", {}).get("bridge_race_cooldown_s", 3600))
@@ -152,17 +207,30 @@ class TorificationDaemon:
         if self._race_thread and self._race_thread.is_alive():
             log.info("Bridge race already running — skip %s", host)
             return False
+        if not self._try_acquire_race_lock():
+            log.info("Bridge race lock busy — skip %s", host)
+            return False
         self._race_cooldown[host] = time.time()
-        self._race_thread = threading.Thread(
-            target=self._race_and_torify_locked,
-            args=(host,),
-            daemon=True,
-            name=f"bridge-race-{host}",
-        )
-        self._race_thread.start()
+        try:
+            self._race_thread = threading.Thread(
+                target=self._race_and_torify_locked,
+                args=(host,),
+                daemon=True,
+                name=f"bridge-race-{host}",
+            )
+            self._race_thread.start()
+        except Exception:
+            self._release_race_lock()
+            raise
         return True
 
     def _race_and_torify_locked(self, host: str) -> None:
+        try:
+            self._race_and_torify_body(host)
+        finally:
+            self._release_race_lock()
+
+    def _race_and_torify_body(self, host: str) -> None:
         tor = self.cfg["tor"]
         torrc = Path(tor["torrc"]).expanduser()
         bridges = parse_bridges(torrc)
@@ -175,20 +243,24 @@ class TorificationDaemon:
             bridges,
             host,
             exit_countries=tor.get("exit_countries", "{us},{de},{gb}"),
+            plugins=parse_transport_plugins(torrc),
         )
         if not results:
             log.warning("No working bridge for %s", host)
             self._notify("Не удалось разблокировать", f"{host}: нет рабочего моста")
             return
         winner = results[0]
-        log.info("Winner: %s @ %.0f ms", winner.bridge.address, winner.latency_ms)
+        log.info("Winner: %s @ %.0f ms (HTTP confirmed)", winner.bridge.address, winner.latency_ms)
         apply_winning_bridge(torrc, tor["bridges_file"], winner.bridge, bridges)
         subprocess.run(["systemctl", "--user", "restart", "torification-tor.service"], check=False)
-        time.sleep(8)
-        # повторная HTTP-probe после смены моста
+        cookie = Path(tor["data_dir"]).expanduser() / "control_auth_cookie"
+        if not ensure_torification_tor(int(tor["socks_port"]), int(tor["control_port"]), cookie):
+            log.warning("Tor did not come back after bridge switch for %s", host)
+            self._notify("Мост сменён, Tor не поднялся", host)
+            return
         app = probe_site(host, self._socks_ports, timeout_s=20)
-        if app.needs_torify or (app.via_socks and app.via_socks.ok):
-            port = self._socks_port_from_probe(app.via_socks.reason if app.via_socks else "")
+        if app.via_socks and app.via_socks.ok:
+            port = self._socks_port_from_probe(app.via_socks.reason)
             self._torify_hosts(related_torify_hosts(host), port, "bridge_race", winner.latency_ms)
         else:
             log.warning("Bridge race done but %s still not OK via HTTP", host)
@@ -197,15 +269,17 @@ class TorificationDaemon:
         if self._should_skip(host):
             return
 
+        # Probe the opened host (chat.openai.com), not eTLD+1 (openai.com).
+        check_host = host
         root = registrable_domain(host)
-        check_host = root if not self._should_skip(root) else host
 
         now = time.time()
         last = self._seen.get(check_host, 0)
         if not force:
-            if check_host in self.torified:
+            meta = self.torified.get(check_host) or self.torified.get(root)
+            if meta:
                 interval = float(self.cfg["general"].get("retorify_interval", 3600))
-                if interval and now - self.torified[check_host].get("since", 0) < interval:
+                if interval and now - meta.get("since", 0) < interval:
                     return
             elif now - last < 15:
                 return
@@ -216,12 +290,14 @@ class TorificationDaemon:
         if not ensure_torification_tor(int(tor["socks_port"]), int(tor["control_port"]), cookie):
             log.error("torification-tor not ready")
             self._notify("Tor не готов", "Перезапуск torification-tor…")
+            return
 
         probe_cfg = self.cfg.get("probe", {})
         timeout = int(probe_cfg.get("http_timeout_s", 15))
 
         app = probe_site(check_host, socks_ports=self._socks_ports, timeout_s=timeout)
         direct_tcp = probe_tcp(check_host, 443, int(probe_cfg.get("connect_timeout_ms", 5000)))
+        self._record_ml(check_host, app, direct_tcp)
 
         # DPI/ТСПУ: TCP ok, HTTP fail
         if not app.direct.ok and not is_blocked(direct_tcp) and app.needs_torify:
@@ -237,11 +313,7 @@ class TorificationDaemon:
 
         if app.direct.ok:
             self._fail_counts[check_host] = 0
-            if check_host in self.torified:
-                del self.torified[check_host]
-                save_torified(self.torified_file, self.torified)
-                self._refresh_pac()
-                log.info("Untorified %s — direct OK", check_host)
+            self._untorify_hosts(related_torify_hosts(check_host))
             return
 
         plan = classify_block(app, direct_tcp)
@@ -253,6 +325,30 @@ class TorificationDaemon:
             return
 
         self._auto_fix(check_host, app, direct_tcp, plan, allow_bridge_race=allow_bridge_race)
+
+    def _record_ml(self, host: str, app, direct_tcp) -> None:
+        if not self.training_log and not self.classifier:
+            return
+        try:
+            from torification.tcp_probe import ProbeResult, ProbeState
+
+            socks_probe = None
+            if app.via_socks is not None:
+                st = ProbeState.HTTP_OK if app.via_socks.ok else ProbeState.ERROR
+                socks_probe = ProbeResult(
+                    host, 443, st, app.via_socks.latency_ms, app.via_socks.reason,
+                )
+            feats = from_probes(host, direct_tcp, socks_probe, self._fail_counts.get(host, 0))
+            if self.training_log:
+                label = "ok" if app.direct.ok else "blocked"
+                append_training_event(
+                    self.training_log, feats, label, extra={"http": app.direct.reason},
+                )
+            if self.classifier:
+                blocked, conf = self.classifier.predict_blocked(feats, self.ml_threshold)
+                log.info("ML %s blocked=%s conf=%.2f", host, blocked, conf)
+        except Exception:
+            log.debug("ML record failed for %s", host, exc_info=True)
 
     def _auto_fix(self, check_host: str, app, direct_tcp, plan, allow_bridge_race: bool = True) -> None:
         """Автоматически применить fix — без команды пользователя."""
@@ -294,14 +390,18 @@ class TorificationDaemon:
     def poll_once(self) -> None:
         browsers = self.cfg["browsers"]
         names = browsers["process_names"]
-        discovery = discover_hosts(names, self._history_since, self._dns_cache)
+        use_history = bool(browsers.get("use_history", True))
+        discovery = discover_hosts(names, self._history_since, self._dns_cache, use_history=use_history)
         self._history_since = time.time()
-        self._active_hosts = discovery.active
+        active = set(discovery.active)
+        for h in list(active):
+            active.add(registrable_domain(h))
+        self._active_hosts = active
 
         for host in sorted(discovery.all_hosts):
             if self._should_skip(host):
                 continue
-            allow_race = host in discovery.active
+            allow_race = host_matches_active(host, discovery.active)
             try:
                 self._evaluate_host(host, allow_bridge_race=allow_race)
             except Exception:
@@ -310,18 +410,21 @@ class TorificationDaemon:
         self._watchdog_torified()
 
     def _watchdog_torified(self) -> None:
-        """Перепроверка уже torified-хостов — только если они сейчас открыты в браузере."""
-        if not self.torified or not self._active_hosts:
+        """Перепроверка torified-хостов. После PAC браузер ходит на :9054, ss больше не видит сайт."""
+        if not self.torified:
             return
         now = time.time()
-        for host, meta in list(self.torified.items()):
-            root = registrable_domain(host)
-            if root not in self._active_hosts and host not in self._active_hosts:
-                continue
+        with self._lock:
+            items = list(self.torified.items())
+        for host, meta in items:
             if now - meta.get("last_check", 0) < 300:
                 continue
-            meta["last_check"] = now
-            save_torified(self.torified_file, self.torified)
+            with self._lock:
+                if host in self.torified:
+                    self.torified[host]["last_check"] = now
+                    save_torified(self.torified_file, self.torified)
+            self._active_hosts.add(host)
+            self._active_hosts.add(registrable_domain(host))
             port = int(meta.get("port", self.cfg["tor"]["socks_port"]))
             app = probe_site(host, [port], timeout_s=12)
             if not app.via_socks or not app.via_socks.ok:
@@ -330,7 +433,10 @@ class TorificationDaemon:
 
     def fix_host(self, host: str) -> None:
         """Принудительная проверка и разблокировка одного хоста."""
-        self._evaluate_host(host.lower().strip(), force=True)
+        host = host.lower().strip()
+        self._active_hosts.add(host)
+        self._active_hosts.add(registrable_domain(host))
+        self._evaluate_host(host, force=True, allow_bridge_race=True)
 
     def run(self) -> None:
         interval = float(self.cfg["general"]["poll_interval"])

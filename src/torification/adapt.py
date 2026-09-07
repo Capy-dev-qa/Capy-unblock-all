@@ -49,7 +49,10 @@ def classify_block(
         return AdaptPlan(kind, "torify", port=port, detail=app.direct.reason)
 
     if "403" in app.direct.reason and app.via_socks and not app.via_socks.ok:
-        return AdaptPlan(BlockKind.CF_CHALLENGE, "bridge_race", detail="cf_both_sides")
+        # 403 с обеих сторон — WAF/S3/бот-фильтр, гонка мостов не поможет
+        if "403" in (app.via_socks.reason or ""):
+            return AdaptPlan(BlockKind.CF_CHALLENGE, "none", detail="403_both_sides")
+        return AdaptPlan(BlockKind.CF_CHALLENGE, "bridge_race", detail="cf_tor_fail")
 
     if direct_tcp and not is_blocked(direct_tcp) and not app.direct.ok:
         return AdaptPlan(BlockKind.DPI, "bridge_race", detail="dpi_http_fail_tor_also")

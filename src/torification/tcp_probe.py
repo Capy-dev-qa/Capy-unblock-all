@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+import threading
 import time
 from dataclasses import dataclass
 from enum import Enum
@@ -32,6 +33,26 @@ class ProbeResult:
     syn_rtt_ms: float | None = None  # best-effort; equals latency_ms for connect()
 
 
+def _getaddrinfo(host: str, port: int, timeout: float):
+    result: list = []
+    err: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            result.extend(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+        except OSError as e:
+            err.append(e)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise socket.gaierror(socket.EAI_AGAIN, "dns timeout")
+    if err:
+        raise err[0]
+    return result
+
+
 def probe_tcp(
     host: str,
     port: int = 443,
@@ -44,7 +65,7 @@ def probe_tcp(
     t0 = time.perf_counter()
 
     try:
-        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+        infos = _getaddrinfo(host, port, timeout)
     except socket.gaierror as e:
         return ProbeResult(host, port, ProbeState.DNS_FAIL, 0, str(e))
 
@@ -70,13 +91,6 @@ def probe_tcp(
             last_err = "timeout"
         except ConnectionRefusedError:
             last_err = "refused"
-            return ProbeResult(
-                host,
-                port,
-                ProbeState.REFUSED,
-                (time.perf_counter() - t0) * 1000,
-                "RST",
-            )
         except ssl.SSLError as e:
             return ProbeResult(
                 host,
@@ -123,31 +137,50 @@ def probe_via_socks(
     host = host.lower().rstrip(".")
     timeout = timeout_ms / 1000.0
     t0 = time.perf_counter()
+    s: socket.socket | None = None
     try:
+        host_bytes = host.encode("idna")
+        if len(host_bytes) > 255:
+            return ProbeResult(host, port, ProbeState.ERROR, 0, "hostname too long")
         s = socket.create_connection((socks_host, socks_port), timeout=timeout)
         s.settimeout(timeout)
         s.sendall(b"\x05\x01\x00")
         if s.recv(2) != b"\x05\x00":
             return ProbeResult(host, port, ProbeState.ERROR, 0, "socks auth")
-        req = b"\x05\x01\x00\x03" + bytes([len(host)]) + host.encode() + struct.pack("!H", port)
+        req = b"\x05\x01\x00\x03" + bytes([len(host_bytes)]) + host_bytes + struct.pack("!H", port)
         s.sendall(req)
         hdr = s.recv(4)
         if len(hdr) < 4 or hdr[1] != 0:
             return ProbeResult(host, port, ProbeState.ERROR, (time.perf_counter() - t0) * 1000, f"socks {hdr!r}")
         atyp = hdr[3]
         if atyp == 1:
-            s.recv(6)
+            rest = s.recv(6)
+            if len(rest) < 6:
+                return ProbeResult(host, port, ProbeState.ERROR, (time.perf_counter() - t0) * 1000, "socks truncated")
         elif atyp == 3:
-            n = s.recv(1)[0]
-            s.recv(n + 2)
+            n = s.recv(1)
+            if not n:
+                return ProbeResult(host, port, ProbeState.ERROR, (time.perf_counter() - t0) * 1000, "socks truncated")
+            rest = s.recv(n[0] + 2)
+            if len(rest) < n[0] + 2:
+                return ProbeResult(host, port, ProbeState.ERROR, (time.perf_counter() - t0) * 1000, "socks truncated")
         elif atyp == 4:
-            s.recv(18)
-        s.close()
+            rest = s.recv(18)
+            if len(rest) < 18:
+                return ProbeResult(host, port, ProbeState.ERROR, (time.perf_counter() - t0) * 1000, "socks truncated")
+        else:
+            return ProbeResult(host, port, ProbeState.ERROR, (time.perf_counter() - t0) * 1000, f"socks atyp {atyp}")
         return ProbeResult(host, port, ProbeState.OK, (time.perf_counter() - t0) * 1000, "via_socks")
     except socket.timeout:
         return ProbeResult(host, port, ProbeState.TIMEOUT, (time.perf_counter() - t0) * 1000, "socks timeout")
-    except OSError as e:
+    except (OSError, UnicodeError) as e:
         return ProbeResult(host, port, ProbeState.ERROR, (time.perf_counter() - t0) * 1000, str(e))
+    finally:
+        if s is not None:
+            try:
+                s.close()
+            except OSError:
+                pass
 
 
 def is_blocked(result: ProbeResult) -> bool:
@@ -173,13 +206,7 @@ def probe_http_status(
 
     url = f"https://{host}{path}"
     t0 = time.perf_counter()
-    handlers: list = []
     if via_socks:
-        try:
-            import socks  # type: ignore[import-untyped]  # optional PySocks
-        except ImportError:
-            return probe_via_socks(host, 443, via_socks[0], via_socks[1], timeout_ms)
-        # fallback: socks probe only
         return probe_via_socks(host, 443, via_socks[0], via_socks[1], timeout_ms)
 
     req = urllib.request.Request(url, headers={"User-Agent": "torification/0.1"})

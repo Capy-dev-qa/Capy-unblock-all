@@ -1,0 +1,3 @@
+# obfs4-мосты для гонки. Формат как в torrc: Bridge obfs4 IP:PORT FINGERPRINT cert=… iat-mode=0
+# Snowflake здесь не гоняется по TCP (это WebRTC).
+Bridge obfs4 146.19.185.17:3873 0E31EA13CF35C3AB5EB9BB0E82E0A8982AE2A77C cert=bBD9F7gggyLD+v/NTZ6FfI0ywcHR7hmTu+IcoMhKKmzuMVzyOOhs3euYVJJgHxWDSqRofw iat-mode=0

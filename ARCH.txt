@@ -1,0 +1,33 @@
+Arch Linux — скопируй и выполни по блокам.
+
+1) Мост obfs4 (в pacman его нет, только AUR):
+
+yay -S --needed obfs4proxy
+
+# нет yay:
+# git clone https://aur.archlinux.org/obfs4proxy.git /tmp/obfs4proxy
+# cd /tmp/obfs4proxy && makepkg -si
+
+2) Папка проекта (не ~). Найди install.sh, зайди туда:
+
+find /run/media /media /mnt /home -name install.sh 2>/dev/null | grep -i torif
+cd /путь/к/torification-arch
+git pull origin feature/control-gui
+bash ./install.sh
+
+3) Сброс start-limit и запуск сервисов (не включай torification-gui в systemctl — это окно):
+
+systemctl --user reset-failed torification-tor.service
+systemctl --user start torification-tor torification-pac torification torification-cursor-proxy
+systemctl --user status torification-tor.service
+
+4) Если снова упало:
+
+journalctl --user -u torification-tor.service -n 40 --no-pager
+
+5) GUI:
+
+exec fish
+torification-gui
+# или:
+~/.local/bin/torification-gui
